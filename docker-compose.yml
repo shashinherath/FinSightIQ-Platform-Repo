@@ -1,0 +1,351 @@
+# ==============================================================================
+# FinSightIQ Platform — Docker Compose Orchestration
+# ==============================================================================
+# Architecture: Polyrepo Microservices Infrastructure
+# Compose Specification: Docker Compose v2
+# ==============================================================================
+
+name: finsightiq-platform
+
+networks:
+  finsightiq-network:
+    name: finsightiq-network
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: finsightiq-postgres-data
+  redis_data:
+    name: finsightiq-redis-data
+  rabbitmq_data:
+    name: finsightiq-rabbitmq-data
+  prometheus_data:
+    name: finsightiq-prometheus-data
+  grafana_data:
+    name: finsightiq-grafana-data
+
+secrets:
+  nuget_token:
+    environment: NUGET_TOKEN
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. PostgreSQL 15 — Multi-Database Engine
+  # ----------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: finsightiq-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_dev_password}
+      POSTGRES_DB: postgres
+    ports:
+      - "${PORT_POSTGRES:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrate/init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - finsightiq-network
+
+  # ----------------------------------------------------------------------------
+  # 2. Redis 7 — Cache & Rate Limiting
+  # ----------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: finsightiq-redis
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-redis_dev_password}"]
+    ports:
+      - "${PORT_REDIS:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD:-redis_dev_password} ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 3s
+    networks:
+      - finsightiq-network
+
+  # ----------------------------------------------------------------------------
+  # 3. RabbitMQ 3.12 — Asynchronous Event Broker
+  # ----------------------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: finsightiq-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-guest}
+    ports:
+      - "${PORT_RABBITMQ:-5672}:5672"
+      - "${PORT_RABBITMQ_MGMT:-15672}:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+    networks:
+      - finsightiq-network
+
+  # ----------------------------------------------------------------------------
+  # 4. Monitoring: Prometheus & Grafana
+  # ----------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: finsightiq-prometheus
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    ports:
+      - "${PORT_PROMETHEUS:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9090/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - finsightiq-network
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: finsightiq-grafana
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin_dev_password}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "${PORT_GRAFANA:-3000}:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    networks:
+      - finsightiq-network
+
+  # ----------------------------------------------------------------------------
+  # 5. Application Microservices (Sprint Lifecycle)
+  # ----------------------------------------------------------------------------
+  gateway:
+    container_name: finsightiq-gateway
+    restart: unless-stopped
+    profiles:
+      - services
+    build:
+      context: ../finsightiq-gateway
+      secrets:
+        - nuget_token
+    ports:
+      - "${PORT_GATEWAY:-5000}:5000"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ASPNETCORE_URLS: http://+:5000
+      Redis__ConnectionString: ${Redis__ConnectionString}
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - finsightiq-network
+
+  user-service:
+    container_name: finsightiq-user-service
+    restart: unless-stopped
+    profiles:
+      - services
+    build:
+      context: ../finsightiq-user-service
+      secrets:
+        - nuget_token
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__UserDb: ${ConnectionStrings__UserDb}
+      Redis__ConnectionString: ${Redis__ConnectionString}
+      RabbitMq__Host: ${RabbitMq__Host}
+      RabbitMq__Username: ${RabbitMq__Username}
+      RabbitMq__Password: ${RabbitMq__Password}
+      Jwt__Issuer: ${JWT_ISSUER:-finsightiq}
+      Jwt__Audience: ${JWT_AUDIENCE:-finsightiq}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - finsightiq-network
+
+  market-data-service:
+    container_name: finsightiq-market-data-service
+    restart: unless-stopped
+    profiles:
+      - services
+    build:
+      context: ../finsightiq-market-data-service
+      secrets:
+        - nuget_token
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__MarketDb: ${ConnectionStrings__MarketDb}
+      Redis__ConnectionString: ${Redis__ConnectionString}
+      RabbitMq__Host: ${RabbitMq__Host}
+      RabbitMq__Username: ${RabbitMq__Username}
+      RabbitMq__Password: ${RabbitMq__Password}
+      AlphaVantage__ApiKey: ${ALPHA_VANTAGE_API_KEY}
+      YahooFinance__ApiKey: ${YAHOO_FINANCE_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - finsightiq-network
+
+  prediction-service:
+    container_name: finsightiq-prediction-service
+    restart: unless-stopped
+    profiles:
+      - services
+    build:
+      context: ../finsightiq-prediction-service
+      secrets:
+        - nuget_token
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__PredictionDb: ${ConnectionStrings__PredictionDb}
+      Redis__ConnectionString: ${Redis__ConnectionString}
+      RabbitMq__Host: ${RabbitMq__Host}
+      RabbitMq__Username: ${RabbitMq__Username}
+      RabbitMq__Password: ${RabbitMq__Password}
+      AiEngine__BaseUrl: ${AI_ENGINE_URL:-http://ai-engine:8000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - finsightiq-network
+
+  portfolio-service:
+    container_name: finsightiq-portfolio-service
+    restart: unless-stopped
+    profiles:
+      - services
+    build:
+      context: ../finsightiq-portfolio-service
+      secrets:
+        - nuget_token
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__PortfolioDb: ${ConnectionStrings__PortfolioDb}
+      Redis__ConnectionString: ${Redis__ConnectionString}
+      RabbitMq__Host: ${RabbitMq__Host}
+      RabbitMq__Username: ${RabbitMq__Username}
+      RabbitMq__Password: ${RabbitMq__Password}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - finsightiq-network
+
+  sentiment-service:
+    container_name: finsightiq-sentiment-service
+    restart: unless-stopped
+    profiles:
+      - services
+    build:
+      context: ../finsightiq-sentiment-service
+      secrets:
+        - nuget_token
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__SentimentDb: ${ConnectionStrings__SentimentDb}
+      Redis__ConnectionString: ${Redis__ConnectionString}
+      RabbitMq__Host: ${RabbitMq__Host}
+      RabbitMq__Username: ${RabbitMq__Username}
+      RabbitMq__Password: ${RabbitMq__Password}
+      NewsApi__ApiKey: ${NEWS_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - finsightiq-network
+
+  ai-engine:
+    container_name: finsightiq-ai-engine
+    restart: unless-stopped
+    profiles:
+      - services
+    build:
+      context: ../finsightiq-ai-engine
+    ports:
+      - "${PORT_AI_ENGINE:-8000}:8000"
+    environment:
+      MARKET_DATA_SERVICE_URL: ${MARKET_DATA_SERVICE_URL:-http://market-data-service:8080}
+    networks:
+      - finsightiq-network
+
+  nlp-engine:
+    container_name: finsightiq-nlp-engine
+    restart: unless-stopped
+    profiles:
+      - services
+    build:
+      context: ../finsightiq-nlp-engine
+    ports:
+      - "${PORT_NLP_ENGINE:-8001}:8001"
+    networks:
+      - finsightiq-network
+
+  web:
+    container_name: finsightiq-web
+    restart: unless-stopped
+    profiles:
+      - services
+    build:
+      context: ../finsightiq-web
+    ports:
+      - "${PORT_WEB:-5173}:80"
+    environment:
+      VITE_API_GATEWAY_URL: http://localhost:${PORT_GATEWAY:-5000}
+    depends_on:
+      - gateway
+    networks:
+      - finsightiq-network

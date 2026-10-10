@@ -1,0 +1,73 @@
+name: Reusable .NET CI Workflow
+
+on:
+  workflow_call:
+    inputs:
+      solution-path:
+        description: 'Relative path to the .NET solution or project file'
+        required: true
+        type: string
+      dockerfile-path:
+        description: 'Relative path to the Dockerfile'
+        required: false
+        default: 'Dockerfile'
+        type: string
+      build-docker:
+        description: 'Whether to validate the Docker container build'
+        required: false
+        default: true
+        type: boolean
+      dotnet-version:
+        description: '.NET SDK version to install'
+        required: false
+        default: '8.0.x'
+        type: string
+    secrets:
+      NUGET_TOKEN:
+        description: 'GitHub Personal Access Token for GitHub Packages NuGet feed'
+        required: true
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  build-and-test:
+    name: Build, Test & Containerize
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDK ${{ inputs.dotnet-version }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - name: Restore dependencies
+        env:
+          NUGET_TOKEN: ${{ secrets.NUGET_TOKEN }}
+        run: |
+          dotnet restore "${{ inputs.solution-path }}"
+
+      - name: Build solution
+        run: |
+          dotnet build "${{ inputs.solution-path }}" --configuration Release --no-restore
+
+      - name: Run unit & integration tests
+        run: |
+          dotnet test "${{ inputs.solution-path }}" --configuration Release --no-build --verbosity normal --collect:"XPlat Code Coverage"
+
+      - name: Validate Docker build with BuildKit secret
+        if: ${{ inputs.build-docker }}
+        env:
+          DOCKER_BUILDKIT: 1
+          NUGET_TOKEN: ${{ secrets.NUGET_TOKEN }}
+        run: |
+          # Create secret file securely without exposing in process list
+          echo "${NUGET_TOKEN}" > /tmp/nuget_token.txt
+          docker build \
+            --secret id=nuget_token,src=/tmp/nuget_token.txt \
+            -f "${{ inputs.dockerfile-path }}" \
+            .
+          rm -f /tmp/nuget_token.txt

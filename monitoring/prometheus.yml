@@ -1,0 +1,56 @@
+# ==============================================================================
+# FinSightIQ — Prometheus Scrape Configuration
+# ==============================================================================
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+scrape_configs:
+  # 1. Prometheus Self-Monitoring
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # 2. YARP API Gateway
+  - job_name: "gateway"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["gateway:5000"]
+
+  # 3. .NET Microservices
+  - job_name: "user-service"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["user-service:8080"]
+
+  - job_name: "market-data-service"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["market-data-service:8080"]
+
+  - job_name: "prediction-service"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["prediction-service:8080"]
+
+  - job_name: "portfolio-service"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["portfolio-service:8080"]
+
+  - job_name: "sentiment-service"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["sentiment-service:8080"]
+
+  # 4. Python ML & NLP Engines
+  - job_name: "ai-engine"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["ai-engine:8000"]
+
+  - job_name: "nlp-engine"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["nlp-engine:8001"]

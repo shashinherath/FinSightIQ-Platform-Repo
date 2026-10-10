@@ -1,0 +1,21 @@
+# ==============================================================================
+# FinSightIQ — Workspace Lock File
+# ==============================================================================
+# Specifies the exact repository name and Git ref (tag, branch, or SHA)
+# for a reproducible multi-repository workspace configuration.
+# Lines starting with '#' and blank lines are ignored.
+#
+# Repository                      Locked Ref
+# ------------------------------------------------------------------------------
+finsightiq-docs                   main
+finsightiq-building-blocks        main
+finsightiq-contracts              main
+finsightiq-gateway                main
+finsightiq-user-service           main
+finsightiq-market-data-service    main
+finsightiq-prediction-service     main
+finsightiq-portfolio-service      main
+finsightiq-sentiment-service      main
+finsightiq-ai-engine              main
+finsightiq-nlp-engine             main
+finsightiq-web                    main

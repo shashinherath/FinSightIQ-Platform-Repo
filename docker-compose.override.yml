@@ -1,0 +1,20 @@
+# ==============================================================================
+# FinSightIQ Platform — Docker Compose Development Override
+# ==============================================================================
+# Applied automatically by Docker Compose on local machines.
+# Used for development-specific port exposures, bind mounts, and overrides.
+# ==============================================================================
+
+services:
+  postgres:
+    ports:
+      - "${PORT_POSTGRES:-5432}:5432"
+
+  redis:
+    ports:
+      - "${PORT_REDIS:-6379}:6379"
+
+  rabbitmq:
+    ports:
+      - "${PORT_RABBITMQ:-5672}:5672"
+      - "${PORT_RABBITMQ_MGMT:-15672}:15672"

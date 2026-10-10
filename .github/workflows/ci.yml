@@ -1,0 +1,123 @@
+name: Platform CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-orchestration:
+    name: Validate Platform Configuration & Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout platform repository
+        uses: actions/checkout@v4
+
+      - name: Verify .gitignore covers environment and secret files
+        run: |
+          git check-ignore -v .env || (echo "ERROR: .env is not ignored in .gitignore" && exit 1)
+          git check-ignore -v test.pem || (echo "ERROR: *.pem is not ignored in .gitignore" && exit 1)
+
+      - name: Validate environment template syntax
+        run: |
+          test -f .env.example
+          # Ensure .env.example contains required core variables
+          grep -q "FINSIGHTIQ_OWNER" .env.example
+          grep -q "POSTGRES_USER" .env.example
+          grep -q "NUGET_TOKEN" .env.example
+
+      - name: Validate Docker Compose specification
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+
+      - name: Run ShellCheck on Bash orchestration scripts
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: '.'
+          ignore_paths: 'node_modules tests/e2e'
+
+      - name: Shell syntax check (bash -n)
+        run: |
+          bash -n bootstrap.sh
+          bash -n migrate/init-databases.sh
+          bash -n migrate/provision.sh
+          bash -n migrate/migrate.sh
+          bash -n seed/seed.sh
+
+      - name: Secret exposure scan
+        run: |
+          # Ensure no real GitHub PATs or private keys are accidentally committed
+          if grep -E -r "ghp_[A-Za-z0-9]{36}" --exclude-dir=".git" --exclude=".env.example" .; then
+            echo "ERROR: Possible GitHub Personal Access Token found in repository!"
+            exit 1
+          fi
+          if grep -E -r -- "-----BEGIN RSA PRIVATE KEY-----" --exclude-dir=".git" .; then
+            echo "ERROR: Unencrypted RSA Private Key found in repository!"
+            exit 1
+          fi
+
+  test-local-infrastructure:
+    name: Test Infrastructure Spin-Up & Database Provisioning
+    runs-on: ubuntu-latest
+    needs: validate-orchestration
+    steps:
+      - name: Checkout platform repository
+        uses: actions/checkout@v4
+
+      - name: Set up environment file
+        run: cp .env.example .env
+
+      - name: Start Docker Compose infrastructure
+        run: |
+          docker compose up -d postgres redis rabbitmq
+
+      - name: Wait for services to become healthy
+        run: |
+          timeout 60s bash -c '
+            until [ "$(docker inspect -f {{.State.Health.Status}} finsightiq-postgres)" == "healthy" ] && \
+                  [ "$(docker inspect -f {{.State.Health.Status}} finsightiq-redis)" == "healthy" ] && \
+                  [ "$(docker inspect -f {{.State.Health.Status}} finsightiq-rabbitmq)" == "healthy" ]; do
+              echo "Waiting for containers to report healthy..."
+              sleep 2
+            done
+          '
+          docker compose ps
+
+      - name: Test Database Provisioning (Idempotent)
+        run: |
+          bash migrate/provision.sh
+          # Re-run provisioning to verify idempotency
+          bash migrate/provision.sh
+
+      - name: Verify all 5 logical databases exist in PostgreSQL
+        run: |
+          for db in usersdb marketdb predictiondb portfoliodb sentimentdb; do
+            docker compose exec -T postgres psql -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$db'" | grep -q 1
+            echo "Verified database: $db exists."
+          done
+
+      - name: Verify Redis PING
+        run: |
+          docker compose exec -T redis redis-cli -a redis_dev_password ping | grep PONG
+
+      - name: Verify RabbitMQ management access
+        run: |
+          docker compose exec -T rabbitmq rabbitmq-diagnostics -q check_running
+
+      - name: Run Flyway Migration Orchestrator (Sibling Discoverer)
+        run: |
+          bash migrate/migrate.sh
+
+      - name: Run Demo Data Seeding Orchestrator
+        run: |
+          bash seed/seed.sh
+
+      - name: Stop infrastructure (non-destructive)
+        if: always()
+        run: |
+          docker compose down
